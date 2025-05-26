@@ -5,11 +5,12 @@ Coordinates multiple scraping strategies with military precision
 
 import asyncio
 import logging
+import os
 from typing import Optional, Dict, Any, List, Set
 from urllib.parse import urlparse, urljoin
 from collections import deque
 
-from ..utils import (
+from utils import (
     is_valid_url,
     url_matches_pattern,
     calculate_content_hash,
@@ -387,6 +388,3 @@ class ScrapingOrchestrator:
             current["metadata"] = page["metadata"]
         
         return sitemap
-
-# Add missing import
-import os

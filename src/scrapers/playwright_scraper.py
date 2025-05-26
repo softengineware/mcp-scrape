@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional, List
 from playwright.async_api import async_playwright, Page, Browser
 import base64
 
-from ..utils import (
+from utils import (
     get_random_user_agent,
     should_rotate_user_agent,
     encode_image_to_base64

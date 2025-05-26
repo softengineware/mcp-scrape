@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 import html2text
 import chardet
 
-from ..utils import (
+from utils import (
     get_random_user_agent,
     clean_content,
     extract_metadata,
