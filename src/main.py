@@ -3,7 +3,7 @@ MCP-Scrape: SEAL Team Six-Grade Web Scraping MCP Server
 Military-grade web scraping with multiple strategies and no failure option
 """
 
-from mcp.server.fastmcp import FastMCP, Context
+from fastmcp import FastMCP, Context
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -47,8 +47,7 @@ class ScrapeContext:
     serper_searcher: Optional[SerperSearcher] = None
     vector_store: Optional[Any] = None
 
-@asynccontextmanager
-async def scrape_lifespan(server: FastMCP) -> AsyncIterator[ScrapeContext]:
+async def lifespan(app: FastMCP):
     """
     Manages the scraping engines lifecycle.
     
@@ -103,9 +102,11 @@ async def scrape_lifespan(server: FastMCP) -> AsyncIterator[ScrapeContext]:
         try:
             from vector_store import VectorStore
             vector_store = VectorStore(os.getenv("DATABASE_URL"))
+            await vector_store.connect()
             logger.info("✅ Vector store initialized")
         except Exception as e:
             logger.error(f"❌ Failed to initialize vector store: {e}")
+            vector_store = None
     
     # Create the orchestrator
     orchestrator = ScrapingOrchestrator(
@@ -115,28 +116,32 @@ async def scrape_lifespan(server: FastMCP) -> AsyncIterator[ScrapeContext]:
         serper_searcher=serper_searcher
     )
     
+    # Store context in the app
+    app.scrape_context = ScrapeContext(
+        orchestrator=orchestrator,
+        playwright_scraper=playwright_scraper,
+        firecrawl_scraper=firecrawl_scraper,
+        http_scraper=http_scraper,
+        serper_searcher=serper_searcher,
+        vector_store=vector_store
+    )
+    
+    yield
+    
+    # Cleanup on shutdown
     try:
-        yield ScrapeContext(
-            orchestrator=orchestrator,
-            playwright_scraper=playwright_scraper,
-            firecrawl_scraper=firecrawl_scraper,
-            http_scraper=http_scraper,
-            serper_searcher=serper_searcher,
-            vector_store=vector_store
-        )
-    finally:
-        # Cleanup
         if playwright_scraper:
             await playwright_scraper.close()
+        if vector_store:
+            await vector_store.disconnect()
         logger.info("🔒 Scraping engines shut down")
+    except Exception as e:
+        logger.error(f"Error during cleanup: {e}")
 
 # Initialize FastMCP server
 mcp = FastMCP(
     "mcp-scrape",
-    description="SEAL Team Six-grade web scraping MCP server with military precision",
-    lifespan=scrape_lifespan,
-    host=os.getenv("HOST", "0.0.0.0"),
-    port=int(os.getenv("PORT", "8080"))
+    description="SEAL Team Six-grade web scraping MCP server with military precision"
 )
 
 @mcp.tool()

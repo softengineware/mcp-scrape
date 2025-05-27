@@ -303,8 +303,7 @@ async def extract_with_llm(
     """
     Extract structured data from content using LLM.
     
-    This is a placeholder for LLM integration.
-    In production, this would call OpenAI, Anthropic, or other LLM APIs.
+    Supports OpenAI and Anthropic APIs based on available keys.
     
     Args:
         content: Content to analyze
@@ -315,18 +314,164 @@ async def extract_with_llm(
     Returns:
         Extracted data with confidence score
     """
-    # Placeholder implementation
-    # In production, integrate with actual LLM service
+    # Check for available LLM APIs
+    openai_key = os.getenv("OPENAI_API_KEY")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     
-    logger.warning("LLM extraction not configured. Returning mock data.")
+    if not openai_key and not anthropic_key:
+        logger.warning("No LLM API keys configured. Set OPENAI_API_KEY or ANTHROPIC_API_KEY.")
+        return {
+            "data": {
+                "notice": "LLM extraction requires API configuration",
+                "instruction": instruction,
+                "content_preview": content[:200] + "..."
+            },
+            "confidence": 0.0
+        }
+    
+    # Build the prompt
+    prompt = f"""Extract structured data from the following content based on the instruction.
+
+Instruction: {instruction}
+"""
+    
+    if schema:
+        prompt += f"\n\nExpected Schema:\n{json.dumps(schema, indent=2)}"
+    
+    if examples:
+        prompt += "\n\nExamples:"
+        for i, example in enumerate(examples[:3]):
+            prompt += f"\n\nExample {i+1}:\n{json.dumps(example, indent=2)}"
+    
+    prompt += f"\n\nContent to analyze:\n{content[:4000]}"  # Limit content length
+    
+    if len(content) > 4000:
+        prompt += "\n\n[Content truncated...]"
+    
+    prompt += "\n\nReturn the extracted data as valid JSON."
+    
+    try:
+        # Try OpenAI first
+        if openai_key:
+            try:
+                from openai import AsyncOpenAI
+                
+                client = AsyncOpenAI(api_key=openai_key)
+                response = await client.chat.completions.create(
+                    model="gpt-4-turbo-preview",
+                    messages=[
+                        {"role": "system", "content": "You are a data extraction expert. Extract structured data from content and return valid JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.1,
+                    response_format={"type": "json_object"}
+                )
+                
+                extracted_data = json.loads(response.choices[0].message.content)
+                
+                return {
+                    "data": extracted_data,
+                    "confidence": 0.9,
+                    "llm_provider": "openai",
+                    "model": "gpt-4-turbo-preview"
+                }
+                
+            except ImportError:
+                logger.warning("OpenAI library not installed. Install with: pip install openai")
+            except Exception as e:
+                logger.error(f"OpenAI extraction failed: {e}")
+        
+        # Try Anthropic as fallback
+        if anthropic_key:
+            try:
+                from anthropic import AsyncAnthropic
+                
+                client = AsyncAnthropic(api_key=anthropic_key)
+                response = await client.messages.create(
+                    model="claude-3-opus-20240229",
+                    max_tokens=4000,
+                    messages=[
+                        {"role": "user", "content": prompt + "\n\nRespond only with valid JSON."}
+                    ],
+                    temperature=0.1
+                )
+                
+                # Extract JSON from Claude's response
+                response_text = response.content[0].text
+                # Try to find JSON in the response
+                import re
+                json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
+                if json_match:
+                    extracted_data = json.loads(json_match.group())
+                else:
+                    extracted_data = {"error": "Could not parse JSON from response", "raw": response_text}
+                
+                return {
+                    "data": extracted_data,
+                    "confidence": 0.85,
+                    "llm_provider": "anthropic",
+                    "model": "claude-3-opus"
+                }
+                
+            except ImportError:
+                logger.warning("Anthropic library not installed. Install with: pip install anthropic")
+            except Exception as e:
+                logger.error(f"Anthropic extraction failed: {e}")
+        
+        # If all LLM attempts fail, try basic extraction
+        return await extract_with_regex_fallback(content, instruction, schema)
+        
+    except Exception as e:
+        logger.error(f"LLM extraction failed: {e}")
+        return {
+            "data": {"error": str(e)},
+            "confidence": 0.0
+        }
+
+async def extract_with_regex_fallback(
+    content: str,
+    instruction: str,
+    schema: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """
+    Fallback extraction using regex patterns.
+    """
+    extracted = {}
+    confidence = 0.3
+    
+    # Common extraction patterns
+    patterns = {
+        "email": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
+        "phone": r'[\+]?[1-9][0-9 .\-\(\)]{8,}[0-9]',
+        "url": r'https?://[^\s<>"{}|\\^\[\]`]+',
+        "price": r'\$?\d+(?:,\d{3})*(?:\.\d{2})?',
+        "date": r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2}'
+    }
+    
+    # Extract based on instruction keywords
+    instruction_lower = instruction.lower()
+    
+    for pattern_name, pattern in patterns.items():
+        if pattern_name in instruction_lower:
+            matches = re.findall(pattern, content)
+            if matches:
+                extracted[pattern_name] = matches[0] if len(matches) == 1 else matches
+                confidence = 0.5
+    
+    # Try to extract based on schema
+    if schema and not extracted:
+        for field, field_type in schema.items():
+            if field_type == "string" and field in content:
+                # Simple heuristic: look for field name followed by value
+                pattern = f'{field}[:"]\s*([^"\n]+)'
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    extracted[field] = match.group(1).strip()
     
     return {
-        "data": {
-            "notice": "LLM extraction requires API configuration",
-            "instruction": instruction,
-            "content_preview": content[:200] + "..."
-        },
-        "confidence": 0.0
+        "data": extracted,
+        "confidence": confidence,
+        "extraction_method": "regex_fallback"
     }
 
 async def store_to_vector_db(
@@ -410,3 +555,136 @@ def encode_image_to_base64(image_bytes: bytes) -> str:
 def decode_base64_to_image(base64_string: str) -> bytes:
     """Decode base64 string to image bytes."""
     return base64.b64decode(base64_string)
+
+class CircuitBreaker:
+    """
+    Circuit breaker pattern for handling failures gracefully.
+    
+    States:
+    - CLOSED: Normal operation, requests pass through
+    - OPEN: Failure threshold exceeded, requests fail immediately
+    - HALF_OPEN: Testing if service recovered
+    """
+    
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout: float = 60.0,
+        success_threshold: int = 2
+    ):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.success_threshold = success_threshold
+        
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time = None
+        self.state = "CLOSED"
+        self._lock = asyncio.Lock()
+    
+    async def call(self, func, *args, **kwargs):
+        """Execute function with circuit breaker protection."""
+        async with self._lock:
+            if self.state == "OPEN":
+                # Check if we should try half-open
+                if self.last_failure_time:
+                    time_since_failure = asyncio.get_event_loop().time() - self.last_failure_time
+                    if time_since_failure >= self.recovery_timeout:
+                        logger.info("Circuit breaker entering HALF_OPEN state")
+                        self.state = "HALF_OPEN"
+                        self.success_count = 0
+                    else:
+                        raise Exception(f"Circuit breaker OPEN, retry in {self.recovery_timeout - time_since_failure:.1f}s")
+        
+        try:
+            result = await func(*args, **kwargs)
+            await self._on_success()
+            return result
+        except Exception as e:
+            await self._on_failure()
+            raise
+    
+    async def _on_success(self):
+        """Handle successful execution."""
+        async with self._lock:
+            self.failure_count = 0
+            
+            if self.state == "HALF_OPEN":
+                self.success_count += 1
+                if self.success_count >= self.success_threshold:
+                    logger.info("Circuit breaker recovered to CLOSED state")
+                    self.state = "CLOSED"
+                    self.success_count = 0
+    
+    async def _on_failure(self):
+        """Handle failed execution."""
+        async with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = asyncio.get_event_loop().time()
+            
+            if self.state == "HALF_OPEN":
+                logger.warning("Circuit breaker failed in HALF_OPEN, returning to OPEN")
+                self.state = "OPEN"
+                self.success_count = 0
+            elif self.failure_count >= self.failure_threshold:
+                logger.error(f"Circuit breaker threshold exceeded ({self.failure_count} failures), entering OPEN state")
+                self.state = "OPEN"
+    
+    def get_state(self) -> str:
+        """Get current circuit breaker state."""
+        return self.state
+
+async def retry_with_exponential_backoff(
+    func,
+    max_retries: int = 5,
+    initial_delay: float = 1.0,
+    max_delay: float = 60.0,
+    backoff_factor: float = 2.0,
+    jitter: bool = True,
+    exceptions=(Exception,)
+):
+    """
+    Enhanced retry with exponential backoff and jitter.
+    
+    Args:
+        func: Async function to retry
+        max_retries: Maximum number of retries
+        initial_delay: Initial delay in seconds
+        max_delay: Maximum delay in seconds
+        backoff_factor: Multiplier for delay after each retry
+        jitter: Add randomization to prevent thundering herd
+        exceptions: Tuple of exceptions to catch
+        
+    Returns:
+        Result of the function
+    """
+    delay = initial_delay
+    last_exception = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            return await func()
+        except exceptions as e:
+            last_exception = e
+            
+            # Check if it's a rate limit error
+            if "rate limit" in str(e).lower():
+                logger.warning(f"Rate limit hit, using longer delay")
+                delay = min(delay * 2, max_delay)
+            
+            if attempt < max_retries:
+                # Add jitter to prevent thundering herd
+                if jitter:
+                    actual_delay = delay * (0.5 + random.random())
+                else:
+                    actual_delay = delay
+                
+                logger.warning(f"Attempt {attempt + 1}/{max_retries + 1} failed: {e}. Retrying in {actual_delay:.1f}s...")
+                await asyncio.sleep(actual_delay)
+                
+                # Exponential backoff
+                delay = min(delay * backoff_factor, max_delay)
+            else:
+                logger.error(f"All {max_retries + 1} attempts failed")
+    
+    raise last_exception
